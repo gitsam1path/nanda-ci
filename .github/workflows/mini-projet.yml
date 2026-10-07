@@ -1,0 +1,159 @@
+name: Mini projet Nanda
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environnement:
+        description: 'Environnement cible'
+        type: choice
+        options: [stage, prod]
+        default: stage
+      simuler_echec:
+        description: 'Faire échouer les tests ?'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: nanda-prix
+  PYTHON_VERSION: "3.12"
+
+jobs:
+
+  qualite:
+    name: Qualité du code
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install black
+      - name: Vérifier le formatage
+        run: black --check .
+
+  tests:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SIMULER_ECHEC: ${{ inputs.simuler_echec }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pytest
+      - name: Échec simulé
+        if: env.SIMULER_ECHEC == 'true'
+        run: |
+          echo "Échec demandé au lancement"
+          exit 1
+      - name: Lancer les tests
+        run: pytest -v
+
+  tests-experimentaux:
+    name: Tests expérimentaux
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: |
+          echo "Fonctionnalité de prix dynamique pas encore prête"
+          exit 1
+
+  build:
+    name: Build
+    needs: [qualite, tests]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.valeur }}
+      cible: ${{ steps.version.outputs.cible }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Déterminer la version et la cible
+        id: version
+        env:
+          CIBLE: ${{ github.ref_type == 'tag' && 'prod' || inputs.environnement || 'stage' }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="0.0.${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          fi
+          echo "valeur=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "cible=$CIBLE" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Version : $VERSION / Cible : $CIBLE"
+
+      - name: Construire le paquet
+        run: |
+          mkdir -p dist
+          cp prix.py dist/
+          echo "$APP_NAME $VERSION (commit $GITHUB_SHA)" > dist/VERSION.txt
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paquet
+          path: dist/
+          retention-days: 1
+
+  deploy:
+    name: Déploiement
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      CIBLE: ${{ needs.build.outputs.cible }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: paquet
+          path: dist/
+
+      - name: Vérifier les accès
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          if [ -z "$API_KEY" ]; then
+            echo "Secret API_KEY manquant"
+            exit 1
+          fi
+          echo "Clé présente (${#API_KEY} caractères)"
+
+      - name: Déployer
+        run: |
+          cat dist/VERSION.txt
+          echo "Déploiement de $APP_NAME $VERSION vers $CIBLE"
+          echo "URL : ${{ vars.APP_URL }}"
+
+  rapport:
+    name: Rapport final
+    needs: [qualite, tests, build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Événement : $GITHUB_EVENT_NAME sur $GITHUB_REF_NAME"
+          echo "Qualité   : ${{ needs.qualite.result }}"
+          echo "Tests     : ${{ needs.tests.result }}"
+          echo "Build     : ${{ needs.build.result }}"
+          echo "Deploy    : ${{ needs.deploy.result }}"
+
+  alerte:
+    name: Alerte
+    needs: [qualite, tests, build, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ALERTE - le pipeline de $APP_NAME a échoué"
