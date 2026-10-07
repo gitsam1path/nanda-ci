@@ -38,7 +38,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install black
       - name: Vérifier le formatage
-        run: black --check .
+        run: black --check --diff .
 
   tests:
     name: Tests unitaires
